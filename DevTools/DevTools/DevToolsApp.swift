@@ -13,5 +13,6 @@ struct DevToolsApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowResizability(.contentMinSize)
     }
 }

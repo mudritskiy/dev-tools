@@ -8,15 +8,14 @@
 import SwiftUI
 
 struct ContentView: View {
+    let appName =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+        ?? ""
+    
     var body: some View {
         MainScreen()
-//        VStack {
-//            Image(systemName: "globe")
-//                .imageScale(.large)
-//                .foregroundStyle(.tint)
-//            Text("Hello, world!")
-//        }
-//        .padding()
+            .navigationTitle("\(appName): Developer Tools")
     }
 }
 
