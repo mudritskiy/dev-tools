@@ -7,33 +7,23 @@
 
 import SwiftUI
 
-actor SimulatorDataService {
-    // MARK: - Directory Size
-    func directorySize(url: URL) -> Int64 {
-        let resourceKeys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .isRegularFileKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: Array(resourceKeys),
-            options: [.skipsHiddenFiles]
-        ) else { return 0 }
+protocol SimulatorDataService {
+    func formatSize(_ size: Int64) async -> String
+    func getSimulatorInfo() async -> [DeviceInfo]
+}
 
-        var total: Int64 = 0
-        for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: resourceKeys),
-                  values.isRegularFile == true else { continue }
-            total += Int64(values.totalFileAllocatedSize ?? 0)
-        }
-        return (total / 1_000) * 1_000
-    }
-
-    // MARK: - Format Size
-    func formatSize(_ size: Int64) -> String {
+actor SimulatorDataServiceImpl: SimulatorDataService {
+    private let _formatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useMB]
         formatter.countStyle = .file
         formatter.isAdaptive = false
+        return formatter
+    }()
 
-        let raw = formatter.string(fromByteCount: size)
+    // MARK: - Format Size
+    func formatSize(_ size: Int64) -> String {
+        let raw = _formatter.string(fromByteCount: size)
         let parts = raw.split(separator: " ").map(String.init)
         guard parts.count == 2,
               let value = Double(parts[0].replacingOccurrences(of: ",", with: "."))
@@ -43,12 +33,12 @@ actor SimulatorDataService {
 
     // MARK: - Simulator Info
     func getSimulatorInfo() -> [DeviceInfo] {
-        let fm = FileManager.default
+        let fileManager = FileManager.default
         let simulatorsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path
 
-        guard fm.fileExists(atPath: simulatorsPath),
-              let entries = try? fm.contentsOfDirectory(atPath: simulatorsPath) else {
+        guard fileManager.fileExists(atPath: simulatorsPath),
+              let entries = try? fileManager.contentsOfDirectory(atPath: simulatorsPath) else {
             print("❌ Simulator directory not found: \(simulatorsPath)")
             return []
         }
@@ -59,19 +49,18 @@ actor SimulatorDataService {
         for udid in entries {
             let devicePath = (simulatorsPath as NSString).appendingPathComponent(udid)
             var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: devicePath, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard fileManager.fileExists(atPath: devicePath, isDirectory: &isDir), isDir.boolValue else { continue }
 
-            let size = directorySize(url: URL(fileURLWithPath: devicePath))
-//            guard size > 100_000_000 else { continue }
+            let size = _directorySize(url: URL(fileURLWithPath: devicePath))
 
             // Read device.plist — written by CoreSimulator, always present
             let plistURL = URL(fileURLWithPath: devicePath).appendingPathComponent("device.plist")
-            let plist    = NSDictionary(contentsOf: plistURL)
+            let plist = NSDictionary(contentsOf: plistURL)
 
             let deviceName = plist?["name"] as? String ?? "Unknown"
 
             // runtime value looks like "com.apple.CoreSimulator.SimRuntime.iOS-17-0"
-            let runtime    = plist?["runtime"] as? String ?? ""
+            let runtime = plist?["runtime"] as? String ?? ""
             let iOSVersion = runtime
                 .components(separatedBy: "iOS-").last?
                 .replacingOccurrences(of: "-", with: ".") ?? "unknown"
@@ -115,5 +104,23 @@ actor SimulatorDataService {
             }
         }
         return map
+    }
+
+    // MARK: - Directory Size
+    private func _directorySize(url: URL) -> Int64 {
+        let resourceKeys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .isRegularFileKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: resourceKeys),
+                  values.isRegularFile == true else { continue }
+            total += Int64(values.totalFileAllocatedSize ?? 0)
+        }
+        return (total / 1_000) * 1_000
     }
 }

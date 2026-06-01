@@ -11,21 +11,26 @@ import SwiftUI
 @Observable
 final class SimulatorDataViewModel {
     var sortOrder = [KeyPathComparator(\DeviceInfo.size, order: .reverse)]
+
     var selectedTableItems = Set<String>()
-    private(set) var selectedItems = Set<String>()  { didSet { updateInfo() } }
-    var devices: [DeviceInfo] = []
+    private(set) var selectedItems = Set<String>()  { didSet { _updateInfo() } }
+
     private(set) var isLoading = false
+
     var isHiddenEmptyDevces: Bool = true
     var isHiddenUnableToEraseDevces: Bool = true
     var isDeleteAlertPresented: Bool = false
     var isEraseAlertPresented: Bool = false
-    
-    @ObservationIgnored let textsFactory = SimulatorTextsFactory()
+    var summaryText: String = ""
+    var generalSizeText: String = ""
 
+    let textsFactory = SimulatorTextsFactory()
+
+    private var _devices: [DeviceInfo] = []
     private let _dataService: SimulatorDataService
     
     var visibleDevices: [DeviceInfo] {
-        devices.filter {
+        _devices.filter {
             if isHiddenEmptyDevces, $0.size < 20_000_000 {
                 return false
             } else if isHiddenUnableToEraseDevces, !$0.isAvailableToErase {
@@ -35,7 +40,11 @@ final class SimulatorDataViewModel {
             }
         }
     }
+    var isActionsDisabled: Bool {
+        isLoading || selectedItems.count == 0
+    }
 
+    // MARK: - Init
     init(dataService: SimulatorDataService) {
         _dataService = dataService
     }
@@ -59,14 +68,17 @@ final class SimulatorDataViewModel {
     }
 
     func load() {
+        selectedItems.removeAll()
+        _devices.removeAll()
+
         isLoading = true
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 await self._dataService.getSimulatorInfo()
             }.value
-            devices = result
-            selectedItems.removeAll()
+            _devices = result
             sort(using: sortOrder)
+            _updateInfo()
             isLoading = false
         }
     }
@@ -75,7 +87,7 @@ final class SimulatorDataViewModel {
         for deviceId in selectedItems {
             Task {
                 do {
-                    try await delete(udid: deviceId)
+                    try await _delete(udid: deviceId)
                 }
             }
         }
@@ -85,18 +97,18 @@ final class SimulatorDataViewModel {
         for deviceId in selectedItems {
             Task {
                 do {
-                    try await erase(udid: deviceId)
+                    try await _erase(udid: deviceId)
                 }
             }
         }
     }
 
-    func delete(udid: String) async throws {
+    private func _delete(udid: String) async throws {
         try await _runSimctl(args: ["delete", udid])
-        devices.removeAll { $0.udid == udid }
+        _devices.removeAll { $0.udid == udid }
     }
 
-    func erase(udid: String) async throws {
+    private func _erase(udid: String) async throws {
         let isValid = await _isRuntimeValid(udid: udid)
         guard isValid else { return }
         
@@ -111,67 +123,7 @@ final class SimulatorDataViewModel {
             .appendingPathComponent("device.plist")
         let plist = NSDictionary(contentsOf: plistURL)
         let runtime = plist?["runtime"] as? String ?? ""
-        // runtime is missing or marked unavailable
         return !runtime.isEmpty && !runtime.contains("unavailable")
-    }
-    
-    func sort(using sortOrder: [KeyPathComparator<DeviceInfo>]) {
-        var finalOrders = sortOrder
-
-        let keyPath: PartialKeyPath<DeviceInfo> = \.humanSize
-        if finalOrders.firstIndex(where: { $0.keyPath == keyPath }) != nil {
-            // Replace existing comparator at the same priority level
-            let newOrder = [KeyPathComparator(\DeviceInfo.size, order: .forward)]
-            finalOrders = newOrder
-//            finalOrders[index] = KeyPathComparator(keyPath, order: newOrder)
-//        } else {
-//            // Otherwise, insert as primary sort
-//            finalOrders.insert(KeyPathComparator(keyPath, order: newOrder), at: 0)
-        }
-        
-        // Keep user choice first, then append fallbacks
-        let fallbacks = [
-            KeyPathComparator(\DeviceInfo.name, order: .forward),
-            KeyPathComparator(\DeviceInfo.iOS, order: .forward)
-        ]
-        
-        // Append only if not already controlled by user
-        for fallback in fallbacks where !finalOrders.contains(where: { $0.keyPath == fallback.keyPath }) {
-            finalOrders.append(fallback)
-        }
-        devices.sort(using: finalOrders)
-    }
-    
-    var summaryText: String = ""
-    var generalSizeText: String = ""
-    
-    func updateInfo() {
-        Task {
-            await _updateSummaryText()
-            await _updateGeneralText()
-        }
-    }
-    
-    private func _updateSummaryText() async {
-        let devices = self.devices.filter { selectedItems.contains($0.udid) }
-        guard !devices.isEmpty else {
-            summaryText = ""
-            return
-        }
-        
-        let size = devices.reduce(0) { $0 + $1.size }
-        let formattedSize = await _dataService.formatSize(size)
-        summaryText = formattedSize //"Selected \(selectedItems.count) devices to be handled. This can free up to \(formattedSize)"
-    }
-
-    private func _updateGeneralText() async {
-        guard !devices.isEmpty else {
-            generalSizeText = ""
-            return
-        }
-        let size = devices.reduce(0) { $0 + $1.size }
-        let formattedSize = await _dataService.formatSize(size)
-        generalSizeText = formattedSize
     }
 
     private func _runSimctl(args: [String]) async throws {
@@ -186,9 +138,63 @@ final class SimulatorDataViewModel {
                     continuation.resume(throwing: SimctlError.failed(code: process.terminationStatus))
                 }
             }
-            do    { try task.run() }
-            catch { continuation.resume(throwing: error) }
+            do {
+                try task.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
+    }
+
+    // MARK: - Sort
+    func sort(using sortOrder: [KeyPathComparator<DeviceInfo>]) {
+        var finalOrders = sortOrder
+
+        let keyPath: PartialKeyPath<DeviceInfo> = \.humanSize
+        if finalOrders.firstIndex(where: { $0.keyPath == keyPath }) != nil {
+            let newOrder = [KeyPathComparator(\DeviceInfo.size, order: .forward)]
+            finalOrders = newOrder
+        }
+        
+        let fallbacks = [
+            KeyPathComparator(\DeviceInfo.name, order: .forward),
+            KeyPathComparator(\DeviceInfo.iOS, order: .forward)
+        ]
+        
+        for fallback in fallbacks where !finalOrders.contains(where: { $0.keyPath == fallback.keyPath }) {
+            finalOrders.append(fallback)
+        }
+        _devices.sort(using: finalOrders)
+    }
+
+    // MARK: - Update sums
+    private func _updateInfo() {
+        Task {
+            await _updateSummaryText()
+            await _updateGeneralText()
+        }
+    }
+    
+    private func _updateSummaryText() async {
+        let devices = _devices.filter { selectedItems.contains($0.udid) }
+        guard !devices.isEmpty else {
+            summaryText = ""
+            return
+        }
+        
+        let size = devices.reduce(0) { $0 + $1.size }
+        let formattedSize = await _dataService.formatSize(size)
+        summaryText = formattedSize
+    }
+
+    private func _updateGeneralText() async {
+        guard !_devices.isEmpty else {
+            generalSizeText = ""
+            return
+        }
+        let size = _devices.reduce(0) { $0 + $1.size }
+        let formattedSize = await _dataService.formatSize(size)
+        generalSizeText = formattedSize
     }
 }
 
@@ -204,5 +210,4 @@ struct SimulatorTextsFactory {
     func actionText(count: Int) -> String {
         "Will be deleted \(count) devices.\nThis action cannot be undone."
     }
-    
 }
